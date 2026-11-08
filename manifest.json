@@ -1,0 +1,9 @@
+{
+    "display_name": "if love · 主题美化器",
+    "loading_order": 100,
+    "js": "index.js",
+    "css": "style.css",
+    "author": "if love",
+    "version": "0.1.1",
+    "homePage": "https://github.com/ruoege49-ship-it/love-theme-manager"
+}
