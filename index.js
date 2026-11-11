@@ -110,6 +110,7 @@ function defaults() {
         activeCss: null,
         prevTheme: null,
         placeholderFallback: '',
+        fonts: [],
         auto: { time: false, slots: {}, char: false, charMap: {}, pickColor: false, dayNight: false, day: '', night: '', dayStart: 7, nightStart: 19, random: 'off', randDay: '', randId: '' },
         fixes,
         font: { body: 'theme', name: 'theme', customUrl: '', customFamily: '', size: 0, lh: 0, ls: null, pg: null, onlyBody: true },
@@ -171,33 +172,84 @@ async function ensureStTheme(data) {
     return false;
 }
 
+/* ---- 绑定背景图 ---- */
+function tval(t, k) { const ov = S().themes.find(x => x.overrideOf === t.id) || {}; return ov[k] ?? t[k]; }
+// 一个主题可以绑多张背景：bgs 是列表，bgMain 是主背景，bgMode 是 'main'（用主背景）或 'random'（随机一张）
+function bgsOf(t) {
+    if (!t) return [];
+    const list = tval(t, 'bgs');
+    if (Array.isArray(list)) return list.filter(Boolean);
+    const one = tval(t, 'bg'); return one ? [one] : [];
+}
+function bgMainOf(t) { const list = bgsOf(t); const m = tval(t, 'bgMain'); return list.includes(m) ? m : (list[0] || ''); }
+function bgOf(t) {
+    const list = bgsOf(t); if (!list.length) return '';
+    if (tval(t, 'bgMode') === 'random' && list.length > 1) {
+        const cur = currentBg(); const pool = list.filter(b => b !== cur);
+        return pool[Math.floor(Math.random() * pool.length)] || list[0];
+    }
+    return bgMainOf(t);
+}
+function setBgs(id, list, main) {
+    list = [...new Set(list.filter(Boolean))];
+    editTheme(id, 'bgs', list);
+    editTheme(id, 'bg', undefined);
+    if (main !== undefined) editTheme(id, 'bgMain', main);
+    const t = findTheme(id); if (t && !list.includes(tval(t, 'bgMain'))) editTheme(id, 'bgMain', list[0] || '');
+}
+const bgThumb = b => `/thumbnail?type=bg&file=${encodeURIComponent(b).replace(/'/g, '%27')}`;
+let openMore = null, openPick = null;
+function bgList() { return [...new Set($('.bg_example').toArray().map(e => e.getAttribute('bgfile')).filter(Boolean))]; }
+function currentBg() {
+    const el = D.getElementById('bg1');
+    const m = el && getComputedStyle(el).backgroundImage.match(/url\(["']?(.*?)["']?\)/);
+    if (!m) return '';
+    try { return decodeURIComponent(new URL(m[1], W.location.href).pathname).replace(/^.*\/backgrounds\//, ''); } catch { return ''; }
+}
+async function applyBg(name, { remember = true } = {}) {
+    if (!name || currentBg() === name) return;
+    if (remember) { S().prevBg = currentBg(); save(); }
+    const el = $('.bg_example').filter((i, e) => e.getAttribute('bgfile') === name).first();
+    if (el.length) { el.trigger('click'); return; }
+    const c = ctx(); const run = c.executeSlashCommandsWithOptions || c.executeSlashCommands;
+    if (run) { try { await run.call(c, `/bg ${name}`); } catch { toastr.warning(`找不到背景「${name}」`, '美化器'); } }
+}
+
 async function useTheme(id, { silent = false } = {}) {
     const t = findTheme(id); if (!t) return;
     if (t.kind === 'css') {
-        S().activeCss = S().activeCss === id ? null : id; save(); applyAll(); renderThemes(); return;
+        S().activeCss = S().activeCss === id ? null : id; save();
+        if (S().activeCss === id) applyBg(bgOf(t));
+        applyAll(); renderThemes(); return;
     }
     const cur = currentStTheme();
-    if (cur === t.data.name) return;
+    if (cur === t.data.name) { applyBg(bgOf(t)); return; }
     if (!(await ensureStTheme(t.data))) return;
     S().prevTheme = cur; save();
     $('#themes').val(t.data.name).trigger('change');
+    applyBg(bgOf(t));
     if (!silent) toastr.success(`已切换到「${t.data.name}」`, '美化器');
     setTimeout(() => { applyAll(); renderThemes(); }, 300);
 }
 
 function undoTheme() {
     const p = S().prevTheme; if (!p) { toastr.info('没有可以撤销的切换。', '美化器'); return; }
-    const cur = currentStTheme(); S().prevTheme = cur; save();
+    const cur = currentStTheme(); S().prevTheme = cur;
+    const pb = S().prevBg; if (pb) { S().prevBg = currentBg(); applyBg(pb, { remember: false }); }
+    save();
     $('#themes').val(p).trigger('change');
     setTimeout(() => { applyAll(); renderThemes(); }, 300);
 }
 
 function coverOf(t) {
-    if (t.cover) return `background:url(${t.cover}) center/cover`;
+    if (t.cover) return `background:url('${t.cover}') center/cover`;
+    const bg = bgMainOf(t);
+    const img = bg ? `url('${bgThumb(bg)}') center/cover, ` : '';
     if (t.kind === 'json' && t.data) {
         const a = t.data.blur_tint_color || '#2A2622', b = t.data.quote_color || t.data.main_text_color || '#B23A48';
-        return `background:linear-gradient(135deg, ${a} 0 62%, ${b} 62% 100%)`;
+        return `background:${img}linear-gradient(135deg, ${a} 0 62%, ${b} 62% 100%)`;
     }
+    if (img) return `background:${img}transparent`;
     return 'background:repeating-linear-gradient(45deg,#D9CFBE 0 6px,#E6DECF 6px 12px)';
 }
 
@@ -217,7 +269,7 @@ async function importFiles(files) {
             const entry = {
                 id: old?.id || 'u' + Date.now() + n, kind: 'json', data,
                 desc: data.love_desc ?? old?.desc ?? '', series: data.love_series ?? old?.series ?? '导入',
-                placeholder: data.love_placeholder ?? old?.placeholder ?? '', cover: old?.cover,
+                placeholder: data.love_placeholder ?? old?.placeholder ?? '', cover: old?.cover, bgs: data.love_bg ? [].concat(data.love_bg) : (old?.bgs ?? (old?.bg ? [old.bg] : [])), bgMain: old?.bgMain, bgMode: data.love_bg_mode ?? old?.bgMode,
             };
             if (old) Object.assign(old, entry); else S().themes.push(entry);
             n++;
@@ -496,15 +548,94 @@ function decorateMessages() {
     });
 }
 
+/* ---- 上传的字体文件（存在酒馆服务器 user/files 里） ---- */
+const FONT_FILE = /\.(ttf|otf|woff2?)(\?|#|$)/i;
+function upFonts() { if (!Array.isArray(S().fonts)) S().fonts = []; return S().fonts; }
+function fontInfo(key) {
+    if (String(key).startsWith('up:')) {
+        const f = upFonts().find(x => 'up:' + x.id === key);
+        return f ? { label: f.name, family: `"${f.family}"` } : null;
+    }
+    return FONTS[key];
+}
+function fontChoices(withEn) {
+    const base = Object.entries(FONTS).filter(([k, f]) => k !== 'custom' && (withEn || !f.en)).map(([k, f]) => [k, f.label, '']);
+    return [...base, ...upFonts().map(f => ['up:' + f.id, f.name, '']), ['custom', FONTS.custom.label, '']];
+}
+
+// 自定义链接：认得字体文件链接和 Google Fonts 的网页链接
+function customFontSource() {
+    const f = S().font; let url = (f.customUrl || '').trim(); let family = (f.customFamily || '').trim();
+    if (!url) return null;
+    const spec = url.match(/fonts\.google\.com\/specimen\/([^/?#]+)/);
+    if (spec) url = `https://fonts.googleapis.com/css2?family=${spec[1]}&display=swap`;
+    if (!family) {
+        const m = url.match(/[?&]family=([^:&;]+)/);
+        if (m) family = decodeURIComponent(m[1].replace(/\+/g, ' '));
+        else if (FONT_FILE.test(url)) family = 'LTM Custom';
+    }
+    return { url, family, isFile: FONT_FILE.test(url) };
+}
+
+function fontFaceCss() {
+    const out = upFonts().map(f => `@font-face { font-family: "${f.family}"; src: url("${f.url}"); font-display: swap; }`);
+    const c = customFontSource();
+    if (c?.isFile && c.family) out.push(`@font-face { font-family: "${c.family.replace(/"/g, '')}"; src: url("${c.url}"); font-display: swap; }`);
+    return out.join('\n');
+}
+
+function b64(buf) {
+    const bytes = new Uint8Array(buf); let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(bin);
+}
+
+async function uploadFonts(files) {
+    let last = null;
+    for (const f of files) {
+        if (!FONT_FILE.test(f.name)) { toastr.warning(`${f.name} 不是字体文件。`, '美化器'); continue; }
+        const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+        const ext = f.name.match(FONT_FILE)[1].toLowerCase();
+        const fileName = `ltm-font-${id}.${ext}`;
+        const label = f.name.replace(FONT_FILE, '').slice(0, 30) || '我的字体';
+        toastr.info(`正在上传「${label}」……`, '美化器');
+        try {
+            const r = await fetch('/api/files/upload', {
+                method: 'POST', headers: ctx().getRequestHeaders(),
+                body: JSON.stringify({ name: fileName, data: b64(await f.arrayBuffer()) }),
+            });
+            if (!r.ok) throw new Error(r.status);
+            const { path } = await r.json();
+            upFonts().push({ id, name: label, family: `LTM ${id}`, url: '/' + String(path).replace(/^\/+/, ''), path });
+            last = 'up:' + id;
+            toastr.success(`「${label}」上传好了。`, '美化器');
+        } catch (e) {
+            toastr.error(`「${label}」上传失败（${e.message}）。文件太大时可以先转成 woff2 再传。`, '美化器');
+        }
+    }
+    if (last && S().font.body === 'theme') S().font.body = last; // 刚传的字体直接用上
+    save(); $('#love-tm').remove(); mountPanel(); applyAll();
+}
+
+async function deleteFont(id) {
+    const f = upFonts().find(x => x.id === id); if (!f) return;
+    if (!confirm(`删除字体「${f.name}」？`)) return;
+    S().fonts = upFonts().filter(x => x.id !== id);
+    for (const k of ['body', 'name']) if (S().font[k] === 'up:' + id) S().font[k] = 'theme';
+    save(); $('#love-tm').remove(); mountPanel(); applyAll();
+    try { await fetch('/api/files/delete', { method: 'POST', headers: ctx().getRequestHeaders(), body: JSON.stringify({ path: f.path }) }); } catch { /* 文件留在服务器上也没关系 */ }
+}
+
 function fontFamily(key) {
-    const f = S().font;
-    if (key === 'custom') return f.customFamily ? `"${f.customFamily.replace(/"/g, '')}"` : '';
-    return FONTS[key]?.family || '';
+    if (key === 'custom') { const c = customFontSource(); return c?.family ? `"${c.family.replace(/"/g, '')}"` : ''; }
+    return fontInfo(key)?.family || '';
 }
 
 function loadFontLink(key) {
-    const f = S().font;
-    const url = key === 'custom' ? f.customUrl : FONTS[key]?.url;
+    if (String(key).startsWith('up:')) return;
+    const c = key === 'custom' ? customFontSource() : null;
+    if (c?.isFile) return;
+    const url = key === 'custom' ? c?.url : FONTS[key]?.url;
     if (!url || document.querySelector(`link[data-ltm-font="${key}"][href="${CSS.escape(url)}"]`)) return;
     document.querySelectorAll(`link[data-ltm-font="${key}"]`).forEach(l => l.remove());
     const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = url; l.dataset.ltmFont = key;
@@ -554,6 +685,10 @@ function applyAll() {
     const s = S();
     if (s.font.body !== 'theme') loadFontLink(s.font.body);
     if (s.font.name !== 'theme') loadFontLink(s.font.name);
+
+    let ff = document.getElementById('love-tm-fontfaces');
+    if (!ff) { ff = document.createElement('style'); ff.id = 'love-tm-fontfaces'; document.head.appendChild(ff); }
+    const faces = fontFaceCss(); if (ff.textContent !== faces) ff.textContent = faces;
 
     if (!styleEl) { styleEl = document.createElement('style'); styleEl.id = 'love-tm-layer'; }
     if (!fbEl) { fbEl = document.createElement('style'); fbEl.id = 'love-tm-fallback'; }
@@ -716,13 +851,19 @@ ${toggle('auto.pickColor', '从背景图取色', '取背景图的主色，替换
 }
 
 function fontHtml() {
-    const all = Object.entries(FONTS).map(([k, f]) => [k, f.label, '']);
-    const list = all.filter(([k]) => !FONTS[k].en);
+    const all = fontChoices(true);
+    const list = fontChoices(false);
+    const ups = upFonts();
     return `<div class="ltm-lab2">正文字体</div>${opts('font.body', list, 'ltm-fontopts')}
 <div class="ltm-custom" ${S().font.body === 'custom' || S().font.name === 'custom' ? '' : 'hidden'}>
-  <div class="ltm-field"><span>字体链接</span><input type="text" data-text="font.customUrl" value="${esc(S().font.customUrl)}" placeholder="字体的 CSS 链接"></div>
-  <div class="ltm-field"><span>字体名称</span><input type="text" data-text="font.customFamily" value="${esc(S().font.customFamily)}" placeholder="font-family 里写的名字"></div>
+  <div class="ltm-field"><span>字体链接</span><input type="text" data-text="font.customUrl" value="${esc(S().font.customUrl)}" placeholder="CSS 链接或 .ttf / .woff2 文件链接"></div>
+  <div class="ltm-field"><span>字体名称</span><input type="text" data-text="font.customFamily" value="${esc(S().font.customFamily)}" placeholder="不知道可以不填"></div>
+  <div class="ltm-sub">Google Fonts 的网页链接也能直接粘贴，名字会自动认出来。</div>
 </div>
+<div class="ltm-lab2">我的字体</div>
+<div class="ltm-myfonts">${ups.map(f => `<span class="ltm-fchip" style="font-family:'${f.family}'">${esc(f.name)}<button type="button" data-fdel="${f.id}" title="删除">×</button></span>`).join('')}<button type="button" class="ltm-btn2" id="ltm-fup">＋ 上传字体文件</button></div>
+<input type="file" id="ltm-ffile" accept=".ttf,.otf,.woff,.woff2" multiple hidden>
+<div class="ltm-sub">支持 ttf、otf、woff、woff2。字体存在酒馆服务器上，换手机、换电脑都能用。中文字体文件比较大，上传要等一会。</div>
 <div class="ltm-lab2">大小与间距</div>
 ${slider('font.size', '字号', 12, 22, 1, 'px', 0)}
 ${slider('font.lh', '行距', 1.3, 2.6, 0.1, '', 0)}
@@ -770,18 +911,27 @@ function renderThemes() {
         const ov = S().themes.find(x => x.overrideOf === t.id) || {};
         const desc = ov.desc ?? t.desc; const cover = ov.cover ? { ...t, cover: ov.cover } : t;
         const ph = ov.placeholder ?? t.placeholder;
+        const mine = bgsOf(t); const main = bgMainOf(t); const mode = tval(t, 'bgMode') === 'random' ? 'random' : 'main';
+        const lib = bgList(); mine.forEach(b => { if (!lib.includes(b)) lib.unshift(b); });
         const act = isActive(t);
-        return `<div class="ltm-card${act ? ' act' : ''}" data-id="${t.id}">
+        return `<div class="ltm-card${act ? ' act' : ''}${openMore === t.id ? ' open' : ''}" data-id="${t.id}">
   ${act ? '<span class="ltm-badge">使用中</span>' : ''}
   <div class="ltm-cover" style="${coverOf(cover)}"></div>
   <div class="ltm-name">${esc(themeName(t))}</div>
   <div class="ltm-desc" data-edit="desc" title="点一下编辑简介">${desc ? esc(desc) : '<span class="ltm-ph">没有简介，点这里写一句</span>'}</div>
   <div class="ltm-cardfoot"><span class="ltm-kind">${t.builtin ? 'if love' : (t.kind === 'css' ? 'CSS' : '导入')}</span>
     <span class="ltm-acts"><button type="button" data-act="more" title="更多">⋯</button><button type="button" class="ltm-hole ltm-use${act ? ' on' : ''}" data-act="use" title="使用"></button></span></div>
-  <div class="ltm-more" hidden>
-    <div class="ltm-field"><span>分组</span><input type="text" data-tedit="series" value="${esc(ov.series ?? t.series ?? '')}"></div>
-    <div class="ltm-field"><span>占位句</span><input type="text" data-tedit="placeholder" value="${esc(ph ?? '')}" placeholder="输入框里显示的句子"></div>
-    <div class="ltm-row"><button type="button" class="ltm-btn2" data-act="cover">换封面</button>${t.builtin ? '' : '<button type="button" class="ltm-btn2" data-act="del">删除</button>'}</div>
+  <div class="ltm-more"${openMore === t.id ? '' : ' hidden'}>
+    <div class="ltm-lab2">背景${mine.length ? ` · ${mine.length} 张` : ''}</div>
+    <div class="ltm-thumbs">${mine.map(bg => `<div class="ltm-bt${bg === main ? ' main' : ''}" data-bgmain="${esc(bg)}" title="${esc(bg)}" style="background-image:url('${bgThumb(bg)}')">${bg === main && mine.length > 1 ? '<span class="ltm-bm">主</span>' : ''}<span class="ltm-bx" data-bgdel="${esc(bg)}" title="取消绑定">×</span></div>`).join('')}<button type="button" class="ltm-badd${openPick === t.id ? ' on' : ''}" data-act="bgpick" title="从背景库选">+</button></div>
+    ${mine.length > 1 ? `<div class="ltm-chips ltm-bgmode"><button type="button" class="ltm-op${mode === 'main' ? ' sel' : ''}" data-bgmode="main">用主背景</button><button type="button" class="ltm-op${mode === 'random' ? ' sel' : ''}" data-bgmode="random">随机一张</button></div>` : ''}
+    ${openPick === t.id ? `<div class="ltm-picker">${lib.length ? lib.map(bg => `<div class="ltm-pk${mine.includes(bg) ? ' on' : ''}" data-pick="${esc(bg)}" title="${esc(bg)}" style="background-image:url('${bgThumb(bg)}')"></div>`).join('') : '<div class="ltm-sub">酒馆背景库里还没有图。</div>'}</div>
+    <div class="ltm-row" style="margin-top:6px"><button type="button" class="ltm-btn2" data-act="bgnow">绑定当前背景</button></div>` : ''}
+    <details class="ltm-inner ltm-moreinfo"><summary>分组和占位句</summary>
+      <div class="ltm-field"><span>分组</span><input type="text" data-tedit="series" value="${esc(ov.series ?? t.series ?? '')}"></div>
+      <div class="ltm-field"><span>占位句</span><input type="text" data-tedit="placeholder" value="${esc(ph ?? '')}" placeholder="输入框里显示的句子"></div>
+    </details>
+    <div class="ltm-row ltm-mini"><button type="button" class="ltm-btn2" data-act="cover">换封面</button>${t.builtin ? '' : '<button type="button" class="ltm-btn2" data-act="del">删除</button>'}</div>
   </div>
 </div>`; }).join('')}</div>`).join(''));
 }
@@ -882,8 +1032,14 @@ function bind() {
         e.stopPropagation();
         const id = $(this).closest('.ltm-card').data('id'); const act = this.dataset.act;
         if (act === 'use') useTheme(String(id));
-        if (act === 'more') $(this).closest('.ltm-card').find('.ltm-more').prop('hidden', (i, h) => !h);
+        if (act === 'more') { openMore = openMore === String(id) ? null : String(id); if (!openMore) openPick = null; renderThemes(); }
+        if (act === 'bgpick') { openPick = openPick === String(id) ? null : String(id); renderThemes(); }
         if (act === 'cover') setCover(String(id));
+        if (act === 'bgnow') {
+            const b = currentBg(); if (!b) { toastr.info('现在没有背景图。', '美化器'); return; }
+            const t = findTheme(String(id)); setBgs(String(id), [...bgsOf(t), b]); renderThemes();
+            toastr.success(`已绑定背景「${b.replace(/\.[^.]+$/, '')}」`, '美化器');
+        }
         if (act === 'del' && confirm('删除这个主题？酒馆里已经导入的主题文件不会被删。')) removeTheme(String(id));
     });
     root.on('click', '.ltm-desc[data-edit]', function () {
@@ -893,6 +1049,21 @@ function bind() {
         $(this).replaceWith(`<textarea class="ltm-desc-in" rows="2" placeholder="一句话介绍这个主题">${esc(cur)}</textarea>`);
         card.find('.ltm-desc-in').trigger('focus').on('blur', function () { editTheme(id, 'desc', this.value.trim()); renderThemes(); });
     });
+    const cardId = el => String($(el).closest('.ltm-card').data('id'));
+    root.on('click', '.ltm-card [data-pick]', function () {
+        const id = cardId(this); const t = findTheme(id); const b = this.dataset.pick;
+        const list = bgsOf(t); setBgs(id, list.includes(b) ? list.filter(x => x !== b) : [...list, b]); renderThemes();
+    });
+    root.on('click', '.ltm-card [data-bgdel]', function (e) {
+        e.stopPropagation();
+        const id = cardId(this); setBgs(id, bgsOf(findTheme(id)).filter(x => x !== this.dataset.bgdel)); renderThemes();
+    });
+    root.on('click', '.ltm-card [data-bgmain]', function () {
+        const id = cardId(this); editTheme(id, 'bgMain', this.dataset.bgmain);
+        const t = findTheme(id); if (t && isActive(t)) applyBg(this.dataset.bgmain);
+        renderThemes();
+    });
+    root.on('click', '.ltm-card [data-bgmode]', function () { editTheme(cardId(this), 'bgMode', this.dataset.bgmode); renderThemes(); });
     root.on('change', '.ltm-card input[data-tedit]', function () {
         const id = String($(this).closest('.ltm-card').data('id'));
         editTheme(id, this.dataset.tedit, this.value.trim());
@@ -913,6 +1084,10 @@ function bind() {
     root.on('change', 'input[data-dnh]', function () { const v = Math.min(23, Math.max(0, Math.round(+this.value || 0))); this.value = v; S().auto[this.dataset.dnh] = v; save(); autoTime(true); });
     root.on('click', '#ltm-rand', () => randomTheme());
 
+    root.on('click', '#ltm-fup', () => $('#ltm-ffile').trigger('click'));
+    root.on('change', '#ltm-ffile', function () { const fs = [...this.files]; this.value = ''; if (fs.length) uploadFonts(fs); });
+    root.on('click', '[data-fdel]', function () { deleteFont(this.dataset.fdel); });
+
     root.on('click', '#ltm-scan-btn', runScan);
     root.on('click', '#ltm-all', () => { Object.keys(S().fixes).forEach(k => { S().fixes[k] = true; }); save(); applyAll(); renderFixes(); });
     root.on('click', '#ltm-default', () => {
@@ -923,7 +1098,7 @@ function bind() {
 
 function loadPreviewFonts() {
     Object.entries(FONTS).forEach(([k, f]) => { if (f.url && k !== 'custom') loadFontLink(k); });
-    $('#love-tm .ltm-fontopts .ltm-op').each(function () { const f = FONTS[this.dataset.v]; if (f?.family) this.style.fontFamily = f.family; });
+    $('#love-tm .ltm-fontopts .ltm-op').each(function () { const f = fontInfo(this.dataset.v); if (f?.family) this.style.fontFamily = f.family; });
 }
 
 function mountPanel() {
@@ -948,7 +1123,7 @@ function quickHtml() {
   ${slider('font.lh', '行距', 1.3, 2.6, 0.1, '', 0)}
   ${slider('font.ls', '字距', 0, 0.3, 0.02, 'em', null)}
   ${slider('font.pg', '段距', 0, 1.6, 0.1, 'em', null)}
-  ${opts('font.body', QUICK_FONTS, 'ltm-chips')}
+  ${opts('font.body', [...QUICK_FONTS, ...upFonts().map(f => ['up:' + f.id, f.name, ''])], 'ltm-chips')}
   <div class="ltm-sub">更多字体在扩展设置的美化器面板里。</div>
 </div>`;
 }
@@ -970,7 +1145,7 @@ function openQuick() {
     q.on('click', '#ltm-q-rand', () => { const t = randomTheme(); if (t) q.find('.ltm-q-name').text(themeName(t)); });
     q.on('click', '#ltm-q-undo', () => { undoTheme(); setTimeout(() => q.find('.ltm-q-name').text(currentStTheme()), 400); });
     loadPreviewFonts();
-    q.find('.ltm-chips .ltm-op').each(function () { const f = FONTS[this.dataset.v]; if (f?.family) this.style.fontFamily = f.family; });
+    q.find('.ltm-chips .ltm-op').each(function () { const f = fontInfo(this.dataset.v); if (f?.family) this.style.fontFamily = f.family; });
     setTimeout(() => $(D).on('pointerdown.ltmq', e => { if (!$(e.target).closest('#ltm-quick, #ltm-wand').length) closeQuick(); }), 0);
 }
 
